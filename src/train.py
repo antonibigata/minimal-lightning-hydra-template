@@ -45,6 +45,11 @@ from src import utils
 
 log = utils.get_pylogger(__name__)
 
+try:
+    import horovod.torch as hvd
+except ImportError:
+    log.warning("Horovod is not installed. Horovod is required for distributed training.")
+
 
 @utils.task_wrapper
 def train(cfg: DictConfig) -> Tuple[dict, dict]:
@@ -61,6 +66,9 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
         Tuple[dict, dict]: Dict with metrics and dict with all instantiated objects.
     """
 
+    if cfg.trainer.get("strategy") == "horovod":
+        hvd.init()
+
     # set seed for random number generators in pytorch, numpy and python.random
     if cfg.get("seed"):
         pl.seed_everything(cfg.seed, workers=True)
@@ -75,7 +83,15 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     callbacks: List[Callback] = utils.instantiate_callbacks(cfg.get("callbacks"))
 
     log.info("Instantiating loggers...")
-    logger: List[LightningLoggerBase] = utils.instantiate_loggers(cfg.get("logger"))
+    if cfg.trainer.get("strategy") == "horovod":
+        if hvd.rank() == 0:
+            logger: List[LightningLoggerBase] = utils.instantiate_loggers(cfg.get("logger"))
+        else:
+            logger = None
+    else:
+        logger: List[LightningLoggerBase] = utils.instantiate_loggers(cfg.get("logger"))
+    if cfg.get("find_lr"):
+        logger.wandb.name = None
 
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")
     trainer: Trainer = hydra.utils.instantiate(cfg.trainer, callbacks=callbacks, logger=logger)
@@ -92,6 +108,15 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     if logger:
         log.info("Logging hyperparameters!")
         utils.log_hyperparameters(object_dict)
+
+    if cfg.get("find_lr"):
+        log.info("Finding learning rate...")
+        lr_finder = trainer.tuner.lr_find(model, datamodule=datamodule)
+        fig = lr_finder.plot(suggest=True)
+        fig.show()
+        print("lr_finder resuls: ", lr_finder.results)
+        print("lr finder suggestion: ", lr_finder.suggestion())
+        exit()
 
     if cfg.get("train"):
         log.info("Starting training!")
@@ -123,9 +148,7 @@ def main(cfg: DictConfig) -> Optional[float]:
     metric_dict, _ = train(cfg)
 
     # safely retrieve metric value for hydra-based hyperparameter optimization
-    metric_value = utils.get_metric_value(
-        metric_dict=metric_dict, metric_name=cfg.get("optimized_metric")
-    )
+    metric_value = utils.get_metric_value(metric_dict=metric_dict, metric_name=cfg.get("optimized_metric"))
 
     # return optimized metric
     return metric_value
