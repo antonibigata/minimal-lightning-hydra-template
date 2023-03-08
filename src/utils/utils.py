@@ -2,7 +2,7 @@ import time
 import warnings
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Callable, List
 
 import hydra
 from omegaconf import DictConfig
@@ -90,7 +90,7 @@ def save_file(path: str, content: str) -> None:
         file.write(content)
 
 
-def instantiate_callbacks(callbacks_cfg: DictConfig) -> List[Callback]:
+def instantiate_callbacks(callbacks_cfg: DictConfig, logger=None) -> List[Callback]:
     """Instantiates callbacks from config."""
     callbacks: List[Callback] = []
 
@@ -101,7 +101,10 @@ def instantiate_callbacks(callbacks_cfg: DictConfig) -> List[Callback]:
     if not isinstance(callbacks_cfg, DictConfig):
         raise TypeError("Callbacks config must be a DictConfig!")
 
-    for _, cb_conf in callbacks_cfg.items():
+    for cb_key, cb_conf in callbacks_cfg.items():
+
+        if (logger is None or not len(logger)) and cb_key == "learning_rate_monitor":
+            continue
         if isinstance(cb_conf, DictConfig) and "_target_" in cb_conf:
             log.info(f"Instantiating callback <{cb_conf._target_}>")
             callbacks.append(hydra.utils.instantiate(cb_conf))
@@ -150,12 +153,8 @@ def log_hyperparameters(object_dict: dict) -> None:
 
     # save number of model parameters
     hparams["model/params/total"] = sum(p.numel() for p in model.parameters())
-    hparams["model/params/trainable"] = sum(
-        p.numel() for p in model.parameters() if p.requires_grad
-    )
-    hparams["model/params/non_trainable"] = sum(
-        p.numel() for p in model.parameters() if not p.requires_grad
-    )
+    hparams["model/params/trainable"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    hparams["model/params/non_trainable"] = sum(p.numel() for p in model.parameters() if not p.requires_grad)
 
     hparams["datamodule"] = cfg["datamodule"]
     hparams["trainer"] = cfg["trainer"]

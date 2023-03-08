@@ -82,9 +82,6 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     log.info(f"Instantiating model <{cfg.model._target_}>")
     model: LightningModule = hydra.utils.instantiate(cfg.model)
 
-    log.info("Instantiating callbacks...")
-    callbacks: List[Callback] = utils.instantiate_callbacks(cfg.get("callbacks"))
-
     log.info("Instantiating loggers...")
     if cfg.trainer.get("strategy") == "horovod":
         if hvd.rank() == 0:
@@ -95,6 +92,9 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
         logger: List[LightningLoggerBase] = utils.instantiate_loggers(cfg.get("logger"))
     if cfg.get("find_lr"):
         logger.wandb.name = None
+
+    log.info("Instantiating callbacks...")
+    callbacks: List[Callback] = utils.instantiate_callbacks(cfg.get("callbacks"), logger=logger)
 
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")
     trainer: Trainer = hydra.utils.instantiate(cfg.trainer, callbacks=callbacks, logger=logger)
