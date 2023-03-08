@@ -1,4 +1,5 @@
 import pyrootutils
+import os
 
 root = pyrootutils.setup_root(
     search_from=__file__,
@@ -7,6 +8,8 @@ root = pyrootutils.setup_root(
     dotenv=True,
 )
 
+if os.getenv("DATA_ROOT") is None:
+    os.environ["DATA_ROOT"] = ""
 # ------------------------------------------------------------------------------------ #
 # `pyrootutils.setup_root(...)` is an optional line at the top of each entry file
 # that helps to make the environment more robust and convenient
