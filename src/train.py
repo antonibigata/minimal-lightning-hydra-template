@@ -42,7 +42,7 @@ import hydra
 import pytorch_lightning as pl
 from omegaconf import DictConfig
 from pytorch_lightning import Callback, LightningDataModule, LightningModule, Trainer
-from pytorch_lightning.loggers import LightningLoggerBase
+from pytorch_lightning.loggers import Logger
 
 from src import utils
 
@@ -85,11 +85,11 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     log.info("Instantiating loggers...")
     if cfg.trainer.get("strategy") == "horovod":
         if hvd.rank() == 0:
-            logger: List[LightningLoggerBase] = utils.instantiate_loggers(cfg.get("logger"))
+            logger: List[Logger] = utils.instantiate_loggers(cfg.get("logger"))
         else:
             logger = None
     else:
-        logger: List[LightningLoggerBase] = utils.instantiate_loggers(cfg.get("logger"))
+        logger: List[Logger] = utils.instantiate_loggers(cfg.get("logger"))
     if cfg.get("find_lr"):
         logger.wandb.name = None
 
@@ -146,7 +146,6 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
 
 @hydra.main(version_base="1.2", config_path=root / "configs", config_name="train.yaml")
 def main(cfg: DictConfig) -> Optional[float]:
-
     # train the model
     metric_dict, _ = train(cfg)
 

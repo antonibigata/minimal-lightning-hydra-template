@@ -3,16 +3,76 @@ import warnings
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Callable, List
-
+from functools import wraps
 import hydra
 from omegaconf import DictConfig
 from pytorch_lightning import Callback
-from pytorch_lightning.loggers import LightningLoggerBase
+from pytorch_lightning.loggers import Logger
 from pytorch_lightning.utilities import rank_zero_only
-
+from einops import rearrange
 from src.utils import pylogger, rich_utils
 
 log = pylogger.get_pylogger(__name__)
+
+
+def identity(t, *args, **kwargs):
+    return t
+
+
+def first(arr, d=None):
+    if len(arr) == 0:
+        return d
+    return arr[0]
+
+
+def maybe(fn):
+    @wraps(fn)
+    def inner(x):
+        if not exists(x):
+            return x
+        return fn(x)
+
+    return inner
+
+
+def cast_tuple(val, length=None):
+    if isinstance(val, list):
+        val = tuple(val)
+
+    output = val if isinstance(val, tuple) else ((val,) * default(length, 1))
+
+    if exists(length):
+        assert len(output) == length
+
+    return output
+
+
+def once(fn):
+    called = False
+
+    @wraps(fn)
+    def inner(x):
+        nonlocal called
+        if called:
+            return
+        called = True
+        return fn(x)
+
+    return inner
+
+
+def check_shape(tensor, pattern, **kwargs):
+    return rearrange(tensor, f"{pattern} -> {pattern}", **kwargs)
+
+
+def exists(x):
+    return x is not None
+
+
+def default(val, d):
+    if exists(val):
+        return val
+    return d() if callable(d) else d
 
 
 def task_wrapper(task_func: Callable) -> Callable:
@@ -29,7 +89,6 @@ def task_wrapper(task_func: Callable) -> Callable:
     """
 
     def wrap(cfg: DictConfig):
-
         # apply extra utilities
         extras(cfg)
 
@@ -102,7 +161,6 @@ def instantiate_callbacks(callbacks_cfg: DictConfig, logger=None) -> List[Callba
         raise TypeError("Callbacks config must be a DictConfig!")
 
     for cb_key, cb_conf in callbacks_cfg.items():
-
         if (logger is None or not len(logger)) and cb_key == "learning_rate_monitor":
             continue
         if isinstance(cb_conf, DictConfig) and "_target_" in cb_conf:
@@ -112,9 +170,9 @@ def instantiate_callbacks(callbacks_cfg: DictConfig, logger=None) -> List[Callba
     return callbacks
 
 
-def instantiate_loggers(logger_cfg: DictConfig) -> List[LightningLoggerBase]:
+def instantiate_loggers(logger_cfg: DictConfig) -> List[Logger]:
     """Instantiates loggers from config."""
-    logger: List[LightningLoggerBase] = []
+    logger: List[Logger] = []
 
     if not logger_cfg:
         log.warning("Logger config is empty.")
