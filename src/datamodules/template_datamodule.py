@@ -1,15 +1,18 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional
 
-import torch
 from pytorch_lightning import LightningDataModule
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, random_split
-from torchvision.datasets import MNIST
-from torchvision.transforms import transforms
+from torch.utils.data import DataLoader, Dataset
+
+import sys
+import pyrootutils
+
+root = pyrootutils.setup_root(__file__, pythonpath=True)
+sys.path.append(root)
+from src.datamodules.components.rotation_dataloader import RotationDataset, collate
 
 
-class MNISTDataModule(LightningDataModule):
-    """Example of LightningDataModule for MNIST dataset.
-
+class RotationDataModule(LightningDataModule):
+    """
     A DataModule implements 5 key methods:
 
         def prepare_data(self):
@@ -37,8 +40,11 @@ class MNISTDataModule(LightningDataModule):
 
     def __init__(
         self,
-        data_dir: str = "data/",
-        train_val_test_split: Tuple[int, int, int] = (55_000, 5_000, 10_000),
+        file_list_train: str,
+        file_list_val: str = None,
+        file_list_test: str = None,
+        max_frames: int = None,
+        smooth_output: bool = False,
         batch_size: int = 64,
         num_workers: int = 0,
         pin_memory: bool = False,
@@ -50,24 +56,9 @@ class MNISTDataModule(LightningDataModule):
         # also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
 
-        # data transformations
-        self.transforms = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
         self.data_test: Optional[Dataset] = None
-
-    @property
-    def num_classes(self):
-        return 10
-
-    def prepare_data(self):
-        """Download data if needed.
-
-        Do not use it to assign state (self.x = y).
-        """
-        MNIST(self.hparams.data_dir, train=True, download=True)
-        MNIST(self.hparams.data_dir, train=False, download=True)
 
     def setup(self, stage: Optional[str] = None):
         """Load data. Set variables: `self.data_train`, `self.data_val`, `self.data_test`.
@@ -77,14 +68,23 @@ class MNISTDataModule(LightningDataModule):
         """
         # load and split datasets only if not loaded already
         if not self.data_train and not self.data_val and not self.data_test:
-            trainset = MNIST(self.hparams.data_dir, train=True, transform=self.transforms)
-            testset = MNIST(self.hparams.data_dir, train=False, transform=self.transforms)
-            dataset = ConcatDataset(datasets=[trainset, testset])
-            self.data_train, self.data_val, self.data_test = random_split(
-                dataset=dataset,
-                lengths=self.hparams.train_val_test_split,
-                generator=torch.Generator().manual_seed(42),
+            self.data_train = RotationDataset(
+                self.hparams.file_list_train,
+                max_frames=self.hparams.max_frames,
+                smooth_output=self.hparams.smooth_output,
             )
+            if self.hparams.file_list_val:
+                self.data_val = RotationDataset(
+                    self.hparams.file_list_val,
+                    max_frames=self.hparams.max_frames,
+                    smooth_output=self.hparams.smooth_output,
+                )
+            if self.hparams.file_list_test:
+                self.data_test = RotationDataset(
+                    self.hparams.file_list_test,
+                    max_frames=self.hparams.max_frames,
+                    smooth_output=self.hparams.smooth_output,
+                )
 
     def train_dataloader(self):
         return DataLoader(
@@ -93,40 +93,37 @@ class MNISTDataModule(LightningDataModule):
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             persistent_workers=self.hparams.persistent_workers,
+            collate_fn=collate,
             shuffle=True,
         )
 
     def val_dataloader(self):
-        return DataLoader(
-            dataset=self.data_val,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            persistent_workers=self.hparams.persistent_workers,
-            shuffle=False,
-        )
+        if self.data_val:
+            return DataLoader(
+                dataset=self.data_val,
+                batch_size=self.hparams.batch_size,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                persistent_workers=self.hparams.persistent_workers,
+                collate_fn=collate,
+                shuffle=False,
+            )
+        else:
+            return None
 
     def test_dataloader(self):
-        return DataLoader(
-            dataset=self.data_test,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            persistent_workers=self.hparams.persistent_workers,
-            shuffle=False,
-        )
-
-    def teardown(self, stage: Optional[str] = None):
-        """Clean up after fit or test."""
-        pass
-
-    def state_dict(self):
-        """Extra things to save to checkpoint."""
-        return {}
-
-    def load_state_dict(self, state_dict: Dict[str, Any]):
-        """Things to do when loading checkpoint."""
-        pass
+        if self.data_test:
+            return DataLoader(
+                dataset=self.data_test,
+                batch_size=self.hparams.batch_size,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                persistent_workers=self.hparams.persistent_workers,
+                collate_fn=collate,
+                shuffle=False,
+            )
+        else:
+            return None
 
 
 if __name__ == "__main__":
@@ -135,9 +132,9 @@ if __name__ == "__main__":
     import pyrootutils
 
     root = pyrootutils.setup_root(__file__, pythonpath=True)
-    cfg = omegaconf.OmegaConf.load(root / "configs" / "datamodule" / "mnist.yaml")
+    cfg = omegaconf.OmegaConf.load(root / "configs" / "datamodule" / "rotation_datamodule.yaml")
     # cfg.data_dir = str(root / "data")
+    print(cfg)
     data = hydra.utils.instantiate(cfg)
     data.prepare_data()
     data.setup()
-    print(data.data_train.__getitem__(0)[0].shape)
