@@ -44,6 +44,8 @@ from pytorch_lightning import LightningDataModule, LightningModule, Trainer
 from pytorch_lightning.loggers import Logger
 
 from src import utils
+from src.utils.torch_utils import load_checkpoint
+from src.utils.utils import configure_cfg_from_checkpoint, save_summary
 
 log = utils.get_pylogger(__name__)
 
@@ -64,6 +66,8 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
 
     assert cfg.ckpt_path
 
+    cfg = configure_cfg_from_checkpoint(cfg)
+
     log.info(f"Instantiating datamodule <{cfg.datamodule._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datamodule)
 
@@ -72,6 +76,8 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
 
     log.info("Instantiating loggers...")
     logger: List[Logger] = utils.instantiate_loggers(cfg.get("logger"))
+
+    save_summary(model, cfg.paths.output_dir, logger)
 
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")
     trainer: Trainer = hydra.utils.instantiate(cfg.trainer, logger=logger)
@@ -89,7 +95,21 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
         utils.log_hyperparameters(object_dict)
 
     log.info("Starting testing!")
-    trainer.test(model=model, datamodule=datamodule, ckpt_path=cfg.ckpt_path)
+    if cfg.load_separetely:
+        net = hydra.utils.instantiate(cfg.model.net)
+
+        net = load_checkpoint(
+            net,
+            cfg.ckpt_path,
+            allow_extra_keys=True,
+            extra_key="state_dict",
+            replace=("model.", ""),
+            map_location="cuda",
+        )
+        model.update_inf_model(net.to("cuda"))
+        trainer.test(model=model, datamodule=datamodule)
+    else:
+        trainer.test(model=model, datamodule=datamodule, ckpt_path=cfg.ckpt_path)
 
     # for predictions use trainer.predict(...)
     # predictions = trainer.predict(model=model, dataloaders=dataloaders, ckpt_path=cfg.ckpt_path)

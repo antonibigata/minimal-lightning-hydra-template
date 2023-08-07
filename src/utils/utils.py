@@ -4,13 +4,22 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import Callable, List
 from functools import wraps
+import os
+import torch
+from einops import repeat
+import wandb
 import hydra
+import yaml
 from omegaconf import DictConfig
 from pytorch_lightning import Callback
 from pytorch_lightning.loggers import Logger
 from pytorch_lightning.utilities import rank_zero_only
+from pytorch_lightning.utilities import model_summary
 from einops import rearrange
 from src.utils import pylogger, rich_utils
+import torchvision
+import torchaudio
+import moviepy.editor as mpy
 
 log = pylogger.get_pylogger(__name__)
 
@@ -170,6 +179,7 @@ def instantiate_callbacks(callbacks_cfg: DictConfig, logger=None) -> List[Callba
     return callbacks
 
 
+@rank_zero_only
 def instantiate_loggers(logger_cfg: DictConfig) -> List[Logger]:
     """Instantiates loggers from config."""
     logger: List[Logger] = []
@@ -260,3 +270,198 @@ def close_loggers() -> None:
         if wandb.run:
             log.info("Closing wandb!")
             wandb.finish()
+
+
+def unflatten_wandb_config(dictionary):
+    resultDict = dict()
+    for key, value in dictionary.items():
+        parts = key.split("/")
+        d = resultDict
+        for part in parts[:-1]:
+            if part not in d:
+                d[part] = dict()
+            d = d[part]
+        if isinstance(value, dict):
+            value = value["value"]
+        d[parts[-1]] = value
+    return resultDict
+
+
+def get_latest_checkpoint(folder_path):
+    """Returns path to the latest checkpoint in the folder."""
+
+    if not os.path.exists(folder_path):
+        raise Exception(f"Folder not found! <folder_path={folder_path}>")
+
+    for root, _, files in os.walk(folder_path):
+        checkpoints = [os.path.join(root, file) for file in files if file.endswith(".ckpt")]
+        if checkpoints:
+            return max(checkpoints, key=os.path.getctime)
+
+
+def get_config(folder_path):
+    """Returns path to the config file in the folder."""
+
+    if not os.path.exists(folder_path):
+        raise Exception(f"Folder not found! <folder_path={folder_path}>")
+
+    for root, _, files in os.walk(folder_path):
+        if "config.yaml" in files and ".hydra" not in root:
+            return os.path.join(root, "config.yaml")
+
+
+def get_latest_checkpoint_and_config(folder_path):
+    """Returns latest checkpoint and config from a folder."""
+    checkpoint_path = None
+    config_path = None
+
+    if not os.path.exists(folder_path):
+        log.warning(f"Folder path not found! <folder_path={folder_path}>")
+        return checkpoint_path, config_path
+
+    # get latest checkpoint
+    checkpoint_path = get_latest_checkpoint(folder_path)
+
+    if not checkpoint_path:
+        log.error("Checkpoint not found!")
+        raise Exception(f"Checkpoint not found! <folder_path={folder_path}>")
+        return checkpoint_path, config_path
+
+    # get config from checkpoint
+    config_path = get_config(folder_path)
+
+    if not config_path:
+        log.error("Config not found!")
+        # raise Exception(f"Config not found! <folder_path={folder_path}>")
+        return checkpoint_path, config_path
+
+    return checkpoint_path, config_path
+
+
+def configure_cfg_from_checkpoint(cfg):
+    ckpt_path = Path(cfg.ckpt_path)
+    if ckpt_path.is_dir():
+        cfg.ckpt_path, cfg.config_path = get_latest_checkpoint_and_config(ckpt_path)
+        print(f"Using latest checkpoint: {cfg.ckpt_path}")
+        print(f"Using config: {cfg.config_path}")
+
+    if cfg.get("config_path"):
+        with open(cfg.get("config_path"), "r") as stream:
+            config = yaml.safe_load(stream)
+        unflatten_config = unflatten_wandb_config(config)
+        # update net config with config from checkpoint
+        print("Updating model config.................")
+        config = unflatten_config["model"]["net"]
+        for k in cfg.model.net:
+            if k in config and k not in ["_target_"]:
+                print(f"Overwriting {k}: {cfg.model.net[k]} with {config[k]} (type: {type(config[k])})")
+                if config[k] == "None":
+                    config[k] = None
+                cfg.model.net[k] = config[k]
+        # update datamodule config with config from checkpoint
+        print("Updating datamodule config.............")
+        config = unflatten_config["datamodule"]
+        for k in cfg.datamodule:
+            if k in config and k not in [
+                "_target_",
+                "batch_size",
+                "load_in_memory",
+                "file_list_train",
+                "file_list_test",
+                "file_list_val",
+                "num_frames",
+                "skip_short_videos_thresh",
+            ]:
+                print(f"Overwriting {k}: {cfg.datamodule[k]} with {config[k]}")
+                if config[k] == "None":
+                    config[k] = None
+                cfg.datamodule[k] = config[k]
+
+    return cfg
+
+
+def save_summary(model, save_path, logger):
+    # Save model summary
+    summary = model_summary.ModelSummary(model, -1)
+    # Write the summary into a file
+    with open(save_path + "/model_summary.txt", "w") as f:
+        f.write(summary.__str__())
+    # If logger is wandb, log the summary
+    if logger is not None and len(logger):
+        logger[0].experiment.save(save_path + "/model_summary.txt", policy="now")
+
+
+def log_videos(img_cond, img_pred, logger, audio=None, prefix="", fps=25, sample_rate=16000):
+    repeat_cond = repeat(img_cond, "c h w -> t c h w", t=img_pred.shape[0])
+    grid = torch.cat([repeat_cond, img_pred], dim=-1).cpu() * 255.0
+    temp_video_path = "temp.mp4"
+    success = save_audio_video(
+        grid,
+        audio=audio,
+        frame_rate=fps,
+        sample_rate=sample_rate,
+        save_path=temp_video_path,
+        keep_intermediate=False,
+    )
+    logger.experiment.log(
+        {
+            f"{prefix}/generated_videos": wandb.Video(
+                temp_video_path if success else grid,
+                caption="diffused videos (condition left, generated right)",
+                fps=fps,
+            )
+        },
+    )
+    if success:
+        os.remove(temp_video_path)
+
+
+def save_audio_video(
+    video, audio=None, frame_rate=25, sample_rate=16000, save_path="temp.mp4", keep_intermediate=False
+):
+    """Save audio and video to a single file.
+    video: (t, c, h, w)
+    audio: (channels t)
+    """
+    save_path = str(save_path)
+    try:
+        torchvision.io.write_video("temp_video.mp4", rearrange(video, "t c h w -> t h w c"), frame_rate)
+        video_clip = mpy.VideoFileClip("temp_video.mp4")
+        if audio is not None:
+            torchaudio.save("temp_audio.wav", audio, sample_rate)
+            audio_clip = mpy.AudioFileClip("temp_audio.wav")
+            video_clip = video_clip.set_audio(audio_clip)
+        video_clip.write_videofile(save_path, fps=frame_rate, codec="libx264", audio_codec="aac")
+        if not keep_intermediate:
+            os.remove("temp_video.mp4")
+            if audio is not None:
+                os.remove("temp_audio.wav")
+        return 1
+    except Exception as e:
+        print(e)
+        print("Saving video to file failed")
+        return 0
+
+
+def ask_until_response(question, expected=[]):
+    while True:
+        answer = input(question)
+        if answer in expected:
+            return answer
+        else:
+            print(f"Answer must be in {expected}!")
+
+
+# do same einops operations on a list of tensors
+
+
+def _many(fn):
+    @wraps(fn)
+    def inner(tensors, pattern, **kwargs):
+        return (fn(tensor, pattern, **kwargs) for tensor in tensors)
+
+    return inner
+
+
+def divisible_by(numer, denom):
+    return (numer % denom) == 0
